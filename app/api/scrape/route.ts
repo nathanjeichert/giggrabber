@@ -14,7 +14,7 @@ type Event = {
   url: string
 }
 
-async function scrapeWebsite(url: string): Promise<string> {
+async function scrapeWebsite(url: string): Promise<{ content: string; screenshot: string }> {
   const browser = await chromium.launch({
     headless: true,
     args: [
@@ -31,7 +31,8 @@ async function scrapeWebsite(url: string): Promise<string> {
 
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      viewport: { width: 1920, height: 1080 }
     })
     const page = await context.newPage()
     
@@ -41,8 +42,28 @@ async function scrapeWebsite(url: string): Promise<string> {
       timeout: 30000 
     })
 
-    // Wait a bit for any dynamic content
-    await page.waitForTimeout(2000)
+    // Wait longer for dynamic content to load
+    await page.waitForTimeout(5000)
+
+    // Scroll down to trigger lazy loading
+    await page.evaluate(() => {
+      return new Promise<void>((resolve) => {
+        let totalHeight = 0
+        const distance = 100
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight
+          window.scrollBy(0, distance)
+          totalHeight += distance
+
+          if (totalHeight >= scrollHeight) {
+            clearInterval(timer)
+            // Scroll back to top
+            window.scrollTo(0, 0)
+            setTimeout(resolve, 1000)
+          }
+        }, 100)
+      })
+    })
 
     // Get the page content
     const content = await page.evaluate(() => {
@@ -117,15 +138,25 @@ async function scrapeWebsite(url: string): Promise<string> {
       return `URL: ${window.location.href}\n\nSTRUCTURED DATA:\n${structuredData}\n\nPAGE CONTENT:\n${eventContent}`
     })
 
-    return content
+    // Take a full-page screenshot
+    const screenshot = await page.screenshot({ 
+      fullPage: true,
+      type: 'jpeg',
+      quality: 80
+    })
+
+    return {
+      content,
+      screenshot: screenshot.toString('base64')
+    }
   } finally {
     await browser.close()
   }
 }
 
-async function extractEventsWithGPT(content: string, url: string, openai: OpenAI): Promise<Event[]> {
-  const systemPrompt = `You are an expert at extracting music event information from website content. 
-  Extract all upcoming music events, concerts, shows, or performances from the provided content.
+async function extractEventsWithGPT(content: string, screenshot: string, url: string, openai: OpenAI): Promise<Event[]> {
+  const systemPrompt = `You are an expert at extracting music event information from website content and screenshots. 
+  Extract all upcoming music events, concerts, shows, or performances from the provided content and screenshot.
   
   For each event, extract:
   - venue: The name of the venue (derive from the URL or content if not explicitly stated)
@@ -136,18 +167,45 @@ async function extractEventsWithGPT(content: string, url: string, openai: OpenAI
   - description: A brief description if available
   - url: The URL to the specific event page if mentioned, otherwise use the provided base URL
 
-  Return the data as a JSON array of objects. If no events are found, return an empty array.
+  Use both the text content AND the screenshot to find events. Screenshots can show calendars, event listings, 
+  and visual information that might not be captured in the text. Look for dates, times, band names, and event details
+  in both sources.
+
+  Return the data as a JSON object with an "events" key containing an array of event objects. 
+  If no events are found, return {"events": []}.
   Only include events that are clearly in the future (from today onwards).
   If the date year is not specified, assume it's the current or next year based on context.`
 
-  const userPrompt = `Extract all upcoming music events from this website content:\n\n${content}\n\nBase URL: ${url}`
+  const userPrompt = `Extract all upcoming music events from this website. I'm providing both the text content and a screenshot of the page.
+
+Text Content:
+${content}
+
+Base URL: ${url}
+
+Please analyze both the text and the screenshot to find all upcoming music events.`
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
+        { 
+          role: 'user', 
+          content: [
+            {
+              type: 'text',
+              text: userPrompt
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${screenshot}`,
+                detail: 'high'
+              }
+            }
+          ]
+        }
       ],
       temperature: 0.3,
       response_format: { type: 'json_object' }
@@ -196,10 +254,10 @@ export async function POST(request: NextRequest) {
         console.log(`Scraping ${url}...`)
         
         // Scrape the website
-        const content = await scrapeWebsite(url)
+        const { content, screenshot } = await scrapeWebsite(url)
         
         // Extract events using GPT
-        const events = await extractEventsWithGPT(content, url, openai)
+        const events = await extractEventsWithGPT(content, screenshot, url, openai)
         
         allEvents.push(...events)
       } catch (error) {

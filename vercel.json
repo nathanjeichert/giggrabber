@@ -8,4 +8,4 @@
   "outputDirectory": ".next",
   "framework": "nextjs",
   "installCommand": "npm install && npx playwright install chromium --with-deps"
-}
+} 

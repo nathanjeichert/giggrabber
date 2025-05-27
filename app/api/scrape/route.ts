@@ -1,4 +1,3 @@
-// app/api/scrape/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { chromium } from 'playwright'
 import OpenAI from 'openai'
@@ -219,4 +218,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     )
   }
-}
+} 

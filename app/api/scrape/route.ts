@@ -43,7 +43,81 @@ async function scrapeWebsite(url: string): Promise<{ content: string; screenshot
     })
 
     // Wait longer for dynamic content to load
-    await page.waitForTimeout(5000)
+    // await page.waitForTimeout(5000) // Removed fixed timeout
+
+    // Smarter waiting strategy using Promise.race
+    const eventSelectors = [
+      '.calendar', '.event-list', '#upcoming-shows', 
+      '[class*="calendar"]', '[id*="calendar"]', 
+      '[class*="event"]', '[id*="event"]', 
+      '[class*="schedule"]', '[id*="schedule"]',
+      // Add more specific selectors if known for common platforms
+      // e.g., '.tribe-events', '.eventbrite-widget', '.bandsintown-widget' 
+    ];
+
+    try {
+      console.log(`Waiting for event selectors or content changes on ${url}...`);
+      await Promise.race([
+        // Condition a: Wait for common event selectors
+        ...eventSelectors.map(selector => page.waitForSelector(selector, { timeout: 10000 /* 10 seconds */ })),
+        
+        // Condition b: Wait for body content changes or event keywords
+        page.waitForFunction(() => {
+          const initialHeight = document.body.scrollHeight;
+          const keywords = ['concert', 'show', 'event', 'gig', 'tour', 'festival', 'live music', 'tickets'];
+          let consecutiveStableChecks = 0;
+          const requiredStableChecks = 3; // Number of checks to confirm stability
+
+          return new Promise(resolve => {
+            let checks = 0;
+            const interval = setInterval(() => {
+              checks++;
+              const currentHeight = document.body.scrollHeight;
+              const bodyText = document.body.innerText.toLowerCase();
+              const keywordsFound = keywords.some(kw => bodyText.includes(kw));
+
+              // Check 1: Significant content loaded (more than just basic template)
+              if (currentHeight > 1000 && keywordsFound) {
+                clearInterval(interval);
+                resolve(true);
+                return;
+              }
+
+              // Check 2: Content height stabilized
+              if (currentHeight === initialHeight && checks > 5) { // Give some time for initial load
+                consecutiveStableChecks++;
+                if (consecutiveStableChecks >= requiredStableChecks) {
+                  clearInterval(interval);
+                  resolve(true); // Stable, but maybe not ideal, proceed
+                  return;
+                }
+              } else {
+                consecutiveStableChecks = 0; // Reset if height changes
+              }
+              
+              // Fallback for keywords if height check is not reliable
+              if (keywordsFound && checks > 10) { // After 5 seconds of checking
+                 clearInterval(interval);
+                 resolve(true);
+                 return;
+              }
+
+              if (checks >= 30) { // Max ~15 seconds (30 * 500ms)
+                clearInterval(interval);
+                resolve(false); // Timeout for this condition
+              }
+            }, 500); // Check every 500ms
+          });
+        }, { timeout: 15000 /* 15 seconds total for the function */ }),
+        
+        // Condition c: General timeout as a final fallback
+        page.waitForTimeout(15000 /* 15 seconds */)
+      ]);
+      console.log(`Content loading condition met for ${url}.`);
+    } catch (error) {
+      console.warn(`Timeout or error during smart wait for ${url}:`, error instanceof Error ? error.message : error);
+      // Proceed even if timeout occurs, as some content might still be available or load on scroll
+    }
 
     // Scroll down to trigger lazy loading
     await page.evaluate(() => {
